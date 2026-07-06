@@ -1,0 +1,74 @@
+# 高德地图车机版 逆向 / 编辑工具集
+
+对**高德地图车机版**做逆向分析、配置与资源修改的工作仓库。目标是把车机端加密配置、资源容器、以及后续的 APK 逆向/重打包能力，沉淀成一套可复用、可回验的工具与文档。
+
+> 仅用于用户自己设备上的合法配置查看与修改。
+
+---
+
+## 已经做了什么
+
+### 1. 加密配置文件 解密 / 加密
+- 破解出高德车机配置的加密方案：**AES-128-CBC / NoPadding**，KEY、IV 为定长 16 字节 ASCII。
+- 还原明文外壳结构：`[16B 前缀][4B 明文长度(小端)][明文][补0对齐]`。
+- 支持 `FuncConfig.dat`（功能开关）与 `GblConfig.json`（全局配置）双向转换，含 `8.5` / `7.5` 两套预设。
+- **回验通过**：未改动的明文重新加密，与原密文逐字节一致。
+
+### 2. 资源包 .so 解包 / 打包
+- 逆向出高德自研资源容器（`libMapAsset.so` / `libLayerAsset.so`，**非 ELF**）的格式：
+  `[头][16B×N 索引表][数据区][尾部 zlib 文件名索引]`。
+- 支持解包成目录、编辑后原样回写；文件名通过资源 MD5 在尾部索引反查，另有内置资源表兜底。
+- **回验通过**：未改动重打包，数据区与索引表逐字节一致。
+
+### 3. 实用改法（已验证有效）
+- **红绿灯预测/秒级倒计时/巡航态显示** 等字段的定位与开启（`GblConfig`）。
+- **退出按钮 / 沉浸式全屏 / 导航压低媒体音量** 等功能开关（`FuncConfig`）。
+- **巡航天空**：定位到 `libMapAsset` 的 `mapprofile_*` 档案，开启天空盒总开关 + 抬高相机俯仰角把天空加大。
+
+> 字段清单、天空调法等细节见 [`CLAUDE.md`](./CLAUDE.md)。
+
+---
+
+## 目录结构
+
+```
+.
+├── CLAUDE.md                        # 逆向笔记 / 字段清单 / 操作流程（主文档）
+├── FuncConfig.dat / .txt            # 功能开关：密文 / 明文
+├── GblConfig.json                   # 全局配置（密文，扩展名虽为 .json）
+├── libMapAsset.so                   # 资源包：底图/样式/图标/车标/mapprofile
+├── libLayerAsset.so                 # 资源包：图层渲染
+├── data/libMapAsset/                # 解包后的目录
+├── data/libLayerAsset/
+└── .claude/skills/amap-config-crypto/   # 加解密 + 解打包工具（skill）
+    ├── crypto.py                    # 配置文件加解密
+    └── soasset.py                   # .so 资源包解包/打包
+```
+
+---
+
+## 快速开始
+
+工具统一走 skill `amap-config-crypto`，纯 Python、无第三方依赖（有 openssl 时自动加速）。
+
+```bash
+# 解密 / 加密配置（按扩展名与内容自动判断方向）
+python3 .claude/skills/amap-config-crypto/crypto.py <文件> [--mode 8.5|7.5] [-o 输出]
+
+# 解包资源包
+python3 .claude/skills/amap-config-crypto/soasset.py unpack libMapAsset.so [-o 目录]
+
+# 编辑后回写（--orig 用原文件做模板，保证未改动部分逐字节一致）
+python3 .claude/skills/amap-config-crypto/soasset.py pack <目录> --orig libMapAsset.so [-o 新.so]
+```
+
+改配置的完整流程：**解密 → 编辑明文 → 重新加密 → 改名回刷进车机**。
+
+---
+
+## Roadmap（计划做的）
+
+- [ ] **APK 逆向**：反编译分析高德车机版本体，梳理配置/资源加载链路与更多可调项。
+- [ ] **重签名**：修改后的 APK 重新签名，便于安装与自用测试。
+- [ ] **改包名共存**：修改包名 / 相关标识，使改版与官方版本可在同一台车机上并存。
+- [ ] 把上述能力沉淀为可复用的 skill / 脚本，保持“可回验、逐字节可比对”的一贯要求。

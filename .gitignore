@@ -1,0 +1,20 @@
+# ── OS / IDE ──
+.DS_Store
+.idea/
+
+# ── Python 缓存 ──
+__pycache__/
+*.pyc
+
+# ── 高德版权文件：一律不入库（自用样本，不随开源发布）──
+# 资源包容器
+*.so
+# 配置文件：密文 / 明文 / gzip 数据块
+*.dat
+*.data
+*.txt
+# 解包后的资源目录
+data/
+# 根目录下的高德配置（GblConfig.json 等密文，扩展名虽为 .json）
+# 注意：只挡根目录，skill 自带的 merged_resource_table.json 需保留
+/*.json
