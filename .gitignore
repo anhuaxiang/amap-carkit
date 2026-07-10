@@ -18,3 +18,8 @@ data/
 # 根目录下的高德配置（GblConfig.json 等密文，扩展名虽为 .json）
 # 注意：只挡根目录，skill 自带的 merged_resource_table.json 需保留
 /*.json
+
+# APK 反编译产物（勿入库）
+400.apk
+400_apktool/
+400_jadx/
