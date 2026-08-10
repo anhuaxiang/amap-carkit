@@ -63,9 +63,30 @@ python3 .claude/skills/amap-config-crypto/sopatch.py gbl patch libGbl.so
 - **巡航参数**：三指令窗口 `[before][目标][after]` 定位（不用固定偏移），改写
   `fmov s0/d0,#imm8`（时速）和 `movz w8,#imm16`（时长，单位毫秒）。
   时速受 fmov 立即数限制：只能是 `±(1+m/16)×2^e`，整数 **1~31** 可用，32+ 直接报错。
-- **不丢灯**：12 字节特征码 `fd7bc6a8 54000014 e570ffd0` → 中间 4B 改 `c0035fd6`(ret)。
-  双向扫描，已修复自动跳过（幂等）。
+- **不丢灯**：见下节。双向扫描，已修复自动跳过（幂等）。
 - 都做**写后回读验证**，不过不导出；特征码是 9.5 专用，换版本报"未识别"时**别 `--force` 硬写**。
+
+### 丢灯的根因与两处补丁（反汇编 501.apk 的 libGbl.so 确认）
+
+引擎周期性推送红绿灯倒计时数据，**推来空 vector 时**（数据没算出来 / 定位漂 / 服务端这拍
+没返回 / 两次更新的空窗），代码把"我这次没数据"当成"确实没红绿灯"，**直接清空图层** →
+屏幕上的灯闪断，就是"丢灯"。补丁让空推送被忽略，保留上一次的灯直到真实数据覆盖。
+
+**巡航和导航是两份独立实现，各有一处，要分别打**（两边共用同一条日志串
+`"[engineid=%d][%p][vecTrafficLightInfo = 0]"` @`0x5A5876`，同一个模板复制出来的）：
+
+| id | 函数 | 空数据时原本 | 补丁 |
+|----|------|--------|------|
+| `no_lose_light_cruise_95` | `CruiseTrafficSignalLightLayer::UpdateCruiseTrafficLightCountdown` | `b ClearAllItems` 尾调用 | → `ret` |
+| `no_lose_light_guide_95` | `GuideTrafficSignalLightManager::UpdateTrafficLightCountdown` | `bl ResetData` | → `nop` |
+
+- 巡航那处能直接 `ret`：前一条 `ldp x29,x30,[sp],#0x60` 已恢复完栈帧，`b` 只是尾调用形式；
+  导航那处是普通 `bl` + 继续往下走，只能 `nop`。
+- `ClearAllItems` / `ResetData` 本身没废，其它调用点（退出巡航/导航、销毁）保留，该清还会清。
+- ⚠️ 网页版工具的"不丢灯"**只有巡航那一条**，导航没修——名字名不副实。
+- **实测状态**：巡航 ✅ 已上车验证正常；导航 ⚠️ 未实测。
+  导航侧潜在副作用：`ResetData` 顺手把 alpha 复位成 `1.0f`，而导航有 `CalculateLightAlpha()`
+  做淡入淡出，跳过后残留的灯可能卡在上一次的 alpha。出问题就回退到只打巡航那条。
 
 ## 改配置的流程
 

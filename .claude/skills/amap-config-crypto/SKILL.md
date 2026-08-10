@@ -182,15 +182,35 @@ python3 .claude/skills/amap-config-crypto/sopatch.py cruise95 set libautonavi.so
 
 ```bash
 python3 .claude/skills/amap-config-crypto/sopatch.py gbl info  libGbl.so   # 扫描状态
-python3 .claude/skills/amap-config-crypto/sopatch.py gbl patch libGbl.so   # 打补丁并导出 _patched.so
+python3 .claude/skills/amap-config-crypto/sopatch.py gbl patch libGbl.so   # 全部补丁，导出 _patched.so
+python3 .claude/skills/amap-config-crypto/sopatch.py gbl patch libGbl.so --only no_lose_light_cruise_95
 ```
 
-12 字节特征码整块替换，把中间那条跳转改成 `ret`，跳过丢灯判断：
+**丢灯的根因**（反汇编确认）：引擎周期性推送红绿灯倒计时，推来空 vector 时
+（数据没算出来 / 定位漂 / 服务端这拍没返回 / 更新空窗），代码把"我这次没数据"
+当成"确实没红绿灯"，直接清空图层 → 屏幕上的灯闪断。补丁让空推送被忽略，
+保留上一次的灯，直到真实数据把它覆盖。
+
+**巡航和导航是两份独立实现，各有一处，都要打**（两边共用同一条日志串
+`"[engineid=%d][%p][vecTrafficLightInfo = 0]"` @0x5A5876，是同一个模板复制出来的）：
+
+| id | 函数 | 空数据时原本做什么 | 补丁 |
+|----|------|----------|------|
+| `no_lose_light_cruise_95` | `bl::CruiseTrafficSignalLightLayer::UpdateCruiseTrafficLightCountdown` | `b ClearAllItems`（尾调用） | → `ret` |
+| `no_lose_light_guide_95` | `bl::GuideTrafficSignalLightManager::UpdateTrafficLightCountdown` | `bl ResetData` | → `nop` |
 
 ```
-原始: fd 7b c6 a8 | 54 00 00 14 | e5 70 ff d0
-目标: fd 7b c6 a8 | c0 03 5f d6 | e5 70 ff d0      # 中间 4B: b -> ret
+巡航  原始: fd 7b c6 a8 | 54 00 00 14 | e5 70 ff d0
+      目标: fd 7b c6 a8 | c0 03 5f d6 | e5 70 ff d0    # b -> ret
+
+导航  原始: e0 03 13 aa | 36 08 00 94 | f4 03 13 aa
+      目标: e0 03 13 aa | 1f 20 03 d5 | f4 03 13 aa    # bl -> nop
 ```
+
+巡航那处能直接 `ret`，是因为前一条 `ldp x29,x30,[sp],#0x60` 已经恢复完栈帧，
+`b` 只是"栈收干净后再跳过去"的尾调用形式；导航那处是普通 `bl` + 继续往下走，
+所以只能 `nop` 掉。两处的 `ClearAllItems` / `ResetData` 本身都没废，
+其它调用点（退出巡航/导航、销毁等）原样保留，该清的时候还会清。
 
 **双向扫描**：原始码唯一命中 → `⚪ 未修复`；目标码唯一命中 → `✅ 已修复`（跳过，幂等）；
 都不唯一 → `❌ 未识别`（版本不同）。没有可写补丁时退出码为 1，不产出文件。

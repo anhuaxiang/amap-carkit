@@ -250,12 +250,22 @@ def cmd_cruise95_set(a):
 #
 GBL_PATCHES = [
     {
-        "id": "no_lose_light_95",
+        "id": "no_lose_light_cruise_95",
         "arch": EM_AARCH64,
-        "name": "不丢灯修复 (9.5 ARM64)",
+        "name": "巡航不丢灯 (9.5 ARM64)",
         "orig": "fd7bc6a854000014e570ffd0",
         "patched": "fd7bc6a8c0035fd6e570ffd0",
-        "desc": "中间 4 字节 b -> ret，跳过丢灯判断",
+        "desc": "CruiseTrafficSignalLightLayer::UpdateCruiseTrafficLightCountdown\n"
+                "          空数据时的 b ClearAllItems（尾调用）-> ret，即空推送不再清空图层",
+    },
+    {
+        "id": "no_lose_light_guide_95",
+        "arch": EM_AARCH64,
+        "name": "导航不丢灯 (9.5 ARM64)",
+        "orig": "e00313aa36080094f40313aa",
+        "patched": "e00313aa1f2003d5f40313aa",
+        "desc": "GuideTrafficSignalLightManager::UpdateTrafficLightCountdown\n"
+                "          空数据时的 bl ResetData -> nop，即空推送不再复位显示状态",
     },
 ]
 
@@ -294,7 +304,7 @@ def cmd_gbl_info(a):
     m = elf_machine(data)
     print(f"文件: {a.file}  ({len(data)} bytes)  架构: {arch_name(m)}\n")
     for p, state, off in gbl_scan(data):
-        print(f"{p['name']}")
+        print(f"{p['name']}   [id={p['id']}]")
         print(f"  说明  : {p['desc']}")
         print(f"  原始  : {hexs(bytes.fromhex(p['orig']))}")
         print(f"  目标  : {hexs(bytes.fromhex(p['patched']))}")
@@ -307,11 +317,19 @@ def cmd_gbl_patch(a):
     with open(a.file, "rb") as f:
         data = f.read()
     results = gbl_scan(data)
-    todo = [(p, off) for p, state, off in results if state == "unpatched"]
+    only = set(filter(None, (a.only or "").split(","))) if a.only else None
+    if only:
+        unknown = only - {p["id"] for p in GBL_PATCHES}
+        if unknown:
+            print(f"❌ 未知补丁 id: {', '.join(sorted(unknown))}", file=sys.stderr)
+            return 2
+    todo = [(p, off) for p, state, off in results
+            if state == "unpatched" and (only is None or p["id"] in only)]
 
     for p, state, off in results:
+        tag = "" if only is None or p["id"] in only else "  （--only 未选中，跳过）"
         print(f"{p['name']:<26}{_GBL_STATE_TXT[state]}"
-              + (f"  @0x{off:06X}" if off is not None else ""))
+              + (f"  @0x{off:06X}" if off is not None else "") + tag)
 
     if not todo:
         print("\n没有需要写入的补丁，未导出。")
@@ -324,9 +342,10 @@ def cmd_gbl_patch(a):
         print(f"\n✏️  {p['name']} @0x{off:06X}\n    {hexs(bytes.fromhex(p['orig']))}"
               f"\n -> {hexs(pat)}")
 
-    # 写后回读验证
+    # 写后回读验证（只验本次写入的补丁）
+    written_ids = {p["id"] for p, _ in todo}
     for p, state, off in gbl_scan(bytes(buf)):
-        if state != "patched":
+        if p["id"] in written_ids and state != "patched":
             print(f"❌ 回读验证失败：{p['name']} 状态={state}", file=sys.stderr)
             return 3
 
@@ -364,6 +383,7 @@ def main(argv=None):
     gp = gs.add_parser("patch", help="打补丁并导出")
     gp.add_argument("file")
     gp.add_argument("-o", "--output", help="输出路径")
+    gp.add_argument("--only", help="只应用指定补丁（逗号分隔的 id，见 info 输出），默认全部")
     gp.set_defaults(func=cmd_gbl_patch)
 
     a = ap.parse_args(argv)
