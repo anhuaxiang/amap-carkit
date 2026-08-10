@@ -46,6 +46,27 @@ python3 .claude/skills/amap-config-crypto/soasset.py pack  <目录> --orig libMa
 文件名靠资源 MD5 在尾部 zlib 索引里反查（+ 内置 `merged_resource_table.json` 兜底）。
 已验证：未改动重打包，数据区与索引表**逐字节相同**。格式规则逆向自高德客户端的 `SoParser` 类。
 
+## ELF so 二进制补丁（9.5 / AArch64）：也用 skill
+
+`libautonavi.so` / `libGbl.so` 是**真正的 ELF 动态库**（和上面的资源容器不是一回事），用同一 skill 的 `sopatch.py`：
+
+```bash
+# 巡航触发参数（几秒几码）
+python3 .claude/skills/amap-config-crypto/sopatch.py cruise95 info libautonavi.so
+python3 .claude/skills/amap-config-crypto/sopatch.py cruise95 set  libautonavi.so --time 3 --speed 3
+
+# 不丢灯修复
+python3 .claude/skills/amap-config-crypto/sopatch.py gbl info  libGbl.so
+python3 .claude/skills/amap-config-crypto/sopatch.py gbl patch libGbl.so
+```
+
+- **巡航参数**：三指令窗口 `[before][目标][after]` 定位（不用固定偏移），改写
+  `fmov s0/d0,#imm8`（时速）和 `movz w8,#imm16`（时长，单位毫秒）。
+  时速受 fmov 立即数限制：只能是 `±(1+m/16)×2^e`，整数 **1~31** 可用，32+ 直接报错。
+- **不丢灯**：12 字节特征码 `fd7bc6a8 54000014 e570ffd0` → 中间 4B 改 `c0035fd6`(ret)。
+  双向扫描，已修复自动跳过（幂等）。
+- 都做**写后回读验证**，不过不导出；特征码是 9.5 专用，换版本报"未识别"时**别 `--force` 硬写**。
+
 ## 改配置的流程
 
 1. 解密 → 2. 编辑明文 JSON → 3. 重新加密 → 4. 改名回刷进车机。
