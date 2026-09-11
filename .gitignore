@@ -23,3 +23,13 @@ data/
 400.apk
 400_apktool/
 400_jadx/
+
+# 第三方 / 改造 APK 与生成的签名密钥（勿入库）
+*.apk
+*_coexist.apk
+*_float.apk
+*_qiansign.apk
+*_signed.apk
+*.keystore
+# 注意：skill 内置的注入 smali（.claude/skills/**/assets/smali_inject/）需保留，
+#       它们是 .smali 文件，不被上面任何规则匹配。

@@ -88,6 +88,39 @@ python3 .claude/skills/amap-config-crypto/sopatch.py gbl patch libGbl.so
   导航侧潜在副作用：`ResetData` 顺手把 alpha 复位成 `1.0f`，而导航有 `CalculateLightAlpha()`
   做淡入淡出，跳过后残留的灯可能卡在上一次的 alpha。出问题就回退到只打巡航那条。
 
+## APK 去签 / 共存 / 悬浮：也用 skill
+
+给**高德车机版 APK**做一键改造，用同一 skill 的 `apkmod.py`（逆向自 `toolbox.apk` / 小德工具箱）：
+
+```bash
+S=.claude/skills/amap-config-crypto/apkmod.py
+python3 $S info     amap.apk                                       # 读包名/application/权限/authorities
+python3 $S qiansign amap.apk                                       # 去签（注入 HookApplication）
+python3 $S coexist  amap.apk --pkg com.autonavi.amapauto.coexist  # 共存（改包名 + 去签）
+python3 $S float    amap.apk                                       # 悬浮（floatapp + 去签，实验性）
+```
+
+- ⚠️ **根因（实测）**：高德有**防篡改**，只要用非原厂密钥重签名，启动即闪退（连只 `sign` 不改代码也崩）。
+  **所以任何改动都必须配合能生效的"签名绕过"**。⚠️ 只加一个 classes2.dex 当新 Application **不够**——
+  这个版本还在 native/阿里 SecurityGuard 里查，会弹「应用异常」。
+- **绕过做法（覆盖 classes.dex 里的已有类，实测能过）**：用 `smali` 把整套 `assets/smali_inject/` 汇编成
+  overlay.dex，再用 **dexlib2（`MergeDex.java`）合并进 classes.dex，同名类以 overlay 为准（覆盖）**：
+  `MapApplicationProxy` 父类改成 `bin/mt/signature/KillerApplication`（反射换 `PackageInfo.CREATOR`、
+  清 `sPackageInfoCache`，把签名伪造回原厂证书）+ **覆盖 `com/alibaba/wireless/security/framework/e` 等
+  削弱阿里 SecurityGuard** + 补进 `bin/mt/signature/**`、`floatapp/**`。manifest 不动。**只用 smali 汇编 + dexlib2 合并，不需要 baksmali。**
+- **qiansign**：合并签名绕过（删掉悬浮激活行）；**coexist**：再改 `package`/权限名/`authorities`（不动 activity 类名）；**float**：保留悬浮激活。
+- 三者都会：剥 META-INF 旧签名 → 重签名。**签名用 apksig 做 v1+v2**（与 toolbox 一致，v3 关闭；
+  首次自动下载 apksig，不需要 Android SDK；失败才回退 jarsigner v1）。
+  smali/dexlib2/apksig 工具链首次自动下载到 `~/.config/amap-toolbox/smali/`；密钥固定在 `~/.config/amap-toolbox/amap.keystore`。
+- ⚠️ **限制**：① **版本敏感**：覆盖的是特定高德版本的已有类，换版本可能不匹配/崩（同 toolbox）。
+  ② 共存改了包名，地图 SDK apiKey 绑「包名+签名」→ 地图可能加载不出（但不闪退）；想地图正常优先 `qiansign`。
+  ③ `qiansign` ✅ **已真机验证能正常打开**；`coexist`/`float` 同套注入，本机验证到合法 dex + 签名通过，真机未逐一实测。
+- **一体化出包**：可改文件都在 apk 内（`GblConfig.json`、`libMapAsset/libLayerAsset.so`、`libGbl/libautonavi.so` 等）。
+  用 `--replace 'apk内路径=本地文件'`（可多次）一条命令「塞入改好的文件 + 去签 + 签名」出整包：
+  `python3 apkmod.py qiansign aaa.apk --replace lib/arm64-v8a/libGbl.so=libGbl_new.so -o out.apk`。
+  因为整包已去签重签，内部文件随便改都不触发高德 APK 防篡改。
+- 详见 skill 的「四、APK 去签/共存/悬浮」章节。
+
 ## 改配置的流程
 
 1. 解密 → 2. 编辑明文 JSON → 3. 重新加密 → 4. 改名回刷进车机。

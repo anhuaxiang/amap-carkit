@@ -1,6 +1,6 @@
 ---
 name: amap-config-crypto
-description: 高德地图车机版文件工具箱。(1) 加密/解密配置文件 FuncConfig.dat、GblConfig.json（AES-128-CBC + 定长外壳），支持 .dat/.json/.txt；(2) 解包/打包资源包 libMapAsset.so、libLayerAsset.so（高德自研容器，非 ELF）；(3) 9.5 ELF so 二进制补丁：libautonavi.so 巡航触发时速/时长参数、libGbl.so 不丢灯修复。当用户需要查看、编辑或回写高德车机配置/资源，或提到 gblconfig/funcconfig 乱码、解密加密、libMapAsset/libLayerAsset 解包打包、换图标车标、刷机配置、巡航几秒几码、改巡航参数、丢灯/不丢灯时使用。
+description: 高德地图车机版文件工具箱。(1) 加密/解密配置文件 FuncConfig.dat、GblConfig.json（AES-128-CBC + 定长外壳），支持 .dat/.json/.txt；(2) 解包/打包资源包 libMapAsset.so、libLayerAsset.so（高德自研容器，非 ELF）；(3) 9.5 ELF so 二进制补丁：libautonavi.so 巡航触发时速/时长参数、libGbl.so 不丢灯修复；(4) APK 三合一 apkmod.py：一键共存(改包名)/去签(注入签名校验绕过)/悬浮(系统悬浮窗)，含剥旧签名+重签名。当用户需要查看、编辑或回写高德车机配置/资源，或提到 gblconfig/funcconfig 乱码、解密加密、libMapAsset/libLayerAsset 解包打包、换图标车标、刷机配置、巡航几秒几码、改巡航参数、丢灯/不丢灯，或 APK 共存/去签/悬浮/改包名/重签名时使用。
 ---
 
 # 高德车机配置 加密/解密（AES）与资源包 解包/打包（.so）
@@ -227,4 +227,93 @@ python3 .claude/skills/amap-config-crypto/sopatch.py gbl patch libGbl.so --only 
 - **版本敏感**：特征码来自 9.5(AArch64)。换版本很可能 `❌ 未识别`，此时**不要用 `--force` 硬写**，
   应重新在新版本里定位特征码。9.1(ARM32) 走的是另一套固定偏移方案，本脚本未实现。
 - 算法逆向自「自闭 高德工具整合」网页版 So 工具，本脚本为等价 Python 实现（已用构造样本验证读/写/回读/幂等）。
+- 仅用于用户自己设备上的合法修改。
+
+
+# 四、APK 去签 / 共存 / 悬浮 apkmod.py
+
+给**高德车机版 APK** 一键去签/共存/悬浮。等价复刻「小德工具箱」toolbox.apk 的 `doInjectFloat`/`doCoexist`。
+
+## ⚠️ 根因（实测确认）
+
+高德有**防篡改**：用非原厂密钥重签名，启动即闪退（连只 `sign` 不改代码也崩）。原签名 ID 是 `MINIMAP_`。
+**所以任何改动都必须配合能生效的"签名绕过"。** 光注入一个新类当 Application（classes2.dex）**不够**——
+这个版本还在 native/阿里 SecurityGuard 里查，会弹「应用异常」。
+
+## 做法（覆盖 classes.dex 里的已有类，实测这个版本能过）
+
+用 `smali` 把整套 `assets/smali_inject/` 汇编成 overlay.dex，再用 **dexlib2（`MergeDex.java`）合并进
+`classes.dex`，同名类以 overlay 为准（= 覆盖）**。覆盖的关键类：
+
+- `com/autonavi/amapauto/app/MapApplicationProxy` → 父类改成 `bin/mt/signature/KillerApplication`
+  （KillerApplication 在 `<clinit>`/`onCreate` 里反射替换 `PackageInfo.CREATOR`、清 `sPackageInfoCache`，
+  把签名伪造回**高德原厂证书**）。
+- `com/alibaba/wireless/security/framework/e` 等 5 个已有类 → 覆盖以**削弱阿里 SecurityGuard native 校验**。
+- 新增 `bin/mt/signature/**`（ApkSignatureKillerEx）与 `floatapp/**`（悬浮窗）。
+
+manifest **不动**（application 仍是原版 `MapApplicationProxy`，只是它的父类被换了）。
+**只用 smali 汇编 + dexlib2 合并，不需要 baksmali。**
+
+## 用法
+
+```bash
+S=.claude/skills/amap-config-crypto/apkmod.py
+python3 $S info     amap.apk                                       # 读包名/application/权限/authorities
+python3 $S qiansign amap.apk                                       # 去签（不激活悬浮）
+python3 $S coexist  amap.apk --pkg com.autonavi.amapauto.coexist  # 共存（改包名 + 去签）
+python3 $S float    amap.apk                                       # 悬浮（去签 + 激活 floatapp）
+python3 $S sign     amap.apk                                       # 仅重签名（通用；高德单用会闪退）
+```
+
+- **qiansign**：合并签名绕过；删掉 `MapApplicationProxy.onCreate` 里拉起悬浮那行（floatapp 类仍在但不激活）。
+- **coexist**：去签 + 改 `package`/权限名/`provider authorities`（**不动 activity 等类名**），可与原版并存。
+- **float**：去签 + 保留悬浮激活（`TYPE_APPLICATION_OVERLAY`）。
+- 三者都会：剥 META-INF 旧签名 →（有 zipalign 就对齐）→ 重签名。
+
+## 一体化工作流：改内部资源 + 去签 + 出一个安装包
+
+高德的可改文件都在 APK 内（`assets/res/EngineRes/bl_data/GblConfig.json`、
+`.../DefaultTheme/libMapAsset.so`、`.../libLayerAsset.so`、`lib/arm64-v8a/libGbl.so`、`libautonavi.so` …）。
+配合 **`--replace 'apk内路径=本地文件'`**（可多次），一条命令就能「塞入改好的文件 + 去签 + 签名」出一个整包。
+
+```bash
+# 例：给红绿灯不丢灯(改 libGbl.so) + 巡航天空/图标(改 libMapAsset.so) + 去签，出一个安装包
+# 1) 取出→改
+unzip -o aaa.apk lib/arm64-v8a/libGbl.so 'assets/res/EngineRes/bl_data/DefaultTheme/libMapAsset.so'
+python3 sopatch.py  gbl patch lib/arm64-v8a/libGbl.so -o libGbl_new.so
+python3 soasset.py  unpack .../libMapAsset.so -o mapasset && (改 mapasset 里的资源) && \
+python3 soasset.py  pack   mapasset --orig .../libMapAsset.so -o libMapAsset_new.so
+# 改配置同理：crypto.py 解密 GblConfig.json → 改明文 → 加密回 GblConfig_new.json
+# 2) 一发出包：去签 + 替换这些文件
+python3 apkmod.py qiansign aaa.apk \
+  --replace lib/arm64-v8a/libGbl.so=libGbl_new.so \
+  --replace assets/res/EngineRes/bl_data/DefaultTheme/libMapAsset.so=libMapAsset_new.so \
+  --replace assets/res/EngineRes/bl_data/GblConfig.json=GblConfig_new.json \
+  -o aaa_modded.apk
+```
+
+- `--replace` 走 `zip_repack`，保留其它条目的原压缩方式；改好的文件直接进包，无需回刷设备。
+- 因为整包已去签+重签，**内部文件随便改都不会触发高德的 APK 防篡改**（这正是去签的意义）。
+- ⚠️ 注意：改**布局/资源**要按对应正确方式（如红绿灯样式改 `Style.json`/图片而非 XML，详见 CLAUDE.md 相关章节）。
+
+## 依赖 & 首次运行
+
+- **smali/dexlib2 工具链**：首次自动下载到 `~/.config/amap-toolbox/smali/`（8 个 jar，约 4.7MB，
+  Google Maven + Maven Central）。`MergeDex.java` 首次会用这些 jar 作 classpath 由 `javac` 编译到缓存。
+  可用 `SMALI_CMD` 覆盖 smali 汇编命令。**不需要 baksmali。**
+- **签名**：用 **apksig 做 v1+v2**（与原 toolbox 一致，v3 关闭）。首次自动下载 `apksig-8.7.3.jar` 到缓存，
+  用它编译内置 `SignApk.java` 来签，**不需要 Android SDK / apksigner**。若 apksig 不可用才回退 `jarsigner` v1。
+  密钥 `keytool` 首次生成到 `~/.config/amap-toolbox/amap.keystore`（固定 → 共存版可原地升级）。
+  （resources.arsc 未 zipalign 对齐；Android 11+ 极少数会挑，遇到再装 build-tools 的 zipalign 对齐。）
+- **java**：脚本自动定位 JDK 并注入 `JAVA_HOME`。
+
+## ⚠️ 版本敏感 & 验证状态
+
+- 覆盖的是**特定高德版本的已有类**（`assets/smali_inject/` 抠自 toolbox 目标版本）。
+  **换高德版本可能不匹配、启动崩**——和原 toolbox 一样吃版本。换版本需重新抠对应版本的 smali。
+- **共存的 apiKey 限制**：高德地图 SDK 的 apiKey 绑「包名+签名」，共存改了包名 → 地图可能加载不出/降级
+  （但通常不再闪退）。想地图完全正常优先 `qiansign`（不改包名）。
+- **实测状态**：`qiansign` ✅ **已在真机验证能正常打开**（覆盖合并注入 + 签名后可启动；真机验证时用的是 v1 签名，
+  现默认已升级为 apksig v1+v2）。
+  `coexist`/`float` 走同一套注入，本机已验证能产出合法 dex + 通过 `jarsigner -verify`，真机未逐一实测。
 - 仅用于用户自己设备上的合法修改。
