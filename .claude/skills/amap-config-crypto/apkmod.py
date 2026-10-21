@@ -23,7 +23,8 @@
 
 子命令：
   qiansign —— 去签：合并签名绕过（不激活悬浮）。让重签后的高德过掉自校验能启动。
-  coexist  —— 共存：在去签基础上，再改 package / 权限名 / provider authorities，可与原版并存。
+  coexist  —— 共存：在去签基础上，再改 package / 权限名 / provider authorities / resources.arsc 包名，
+              并把签名绕过 smali 里写死的原包名换成新包名，可与原版并存。
   float    —— 悬浮：去签 + 激活 floatapp/*（系统悬浮窗）。**实验性**。
   sign     —— 仅剥旧签名 + 重签名（通用工具；对高德单用会闪退，要用 qiansign）。
   info     —— 读 manifest 包名 / application / 权限 / authorities。
@@ -37,7 +38,7 @@ smali 工具链：首次自动下载到 ~/.config/amap-toolbox/smali/（可用 S
    即便签名被伪造回原厂，包名仍不符 → 可能地图无法加载/降级（但通常不再闪退）。
 仅用于用户自己设备上的合法修改。
 """
-import sys, os, struct, argparse, zipfile, shutil, subprocess, tempfile, glob, urllib.request
+import sys, os, re, struct, argparse, zipfile, shutil, subprocess, tempfile, glob, urllib.request
 
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 SMALI_ASSET_DIR = os.path.join(SKILL_DIR, "assets", "smali_inject")
@@ -55,6 +56,10 @@ SIG_ENTRY_SUFFIX = (".SF", ".RSA", ".DSA", ".EC")
 APP_PROXY_SMALI = "com/autonavi/amapauto/app/MapApplicationProxy.smali"
 # MapApplicationProxy.onCreate 里拉起悬浮的那行（去签时删掉，只保留签名绕过）
 FLOAT_LOAD_MARK = "Lfloatapp/AutoamapPluginManage;->load"
+# 签名绕过 smali 里写死的原包名（共存时要换成新包名）
+ORIG_PKG = "com.autonavi.amapauto"
+KILLER_SMALI = "bin/mt/signature/KillerApplication.smali"
+SIG_PKG_SMALI = [KILLER_SMALI, "bin/mt/signature/HookApplication.smali", "q3.smali"]
 MERGE_MAIN = "MergeDex"
 MERGE_SRC = os.path.join(SKILL_DIR, "MergeDex.java")
 SIGN_MAIN = "SignApk"
@@ -253,6 +258,26 @@ def axml_apply(b, mapping):
     return bytes(out)
 
 
+def arsc_set_package(b, newpkg):
+    """resources.arsc 的 RES_TABLE_PACKAGE(0x0200) 包名改成 newpkg（移植 tool.apk 的 patchArscPackage）。
+    不改会让 getIdentifier(..., getPackageName()) 在共存包里查不到资源。"""
+    off = u16(b, 2)  # 跳过 RES_TABLE 头
+    while off + 8 <= len(b):
+        t, size = u16(b, off), u32(b, off + 4)
+        if t == 0x0200:
+            nb = newpkg.encode("utf-16le")
+            if len(nb) > 254:
+                sys.exit(f"包名过长，resources.arsc 放不下: {newpkg}")
+            name_off = off + 12  # chunk 头 8B + package id 4B，name 为 char16[128]
+            out = bytearray(b)
+            out[name_off:name_off + 256] = nb + b"\0" * (256 - len(nb))
+            return bytes(out)
+        if size < 8:
+            break
+        off += size
+    sys.exit("resources.arsc 未找到 package chunk")
+
+
 def coexist_mapping(pkg, newpkg, perms, auths):
     """共存：算出 package / 权限名 / authorities 的字符串替换表。"""
     m = {pkg: newpkg}
@@ -288,7 +313,9 @@ def zip_repack(apk_path, replacements, out_path, strip_sig=True):
                 continue
             if name in replacements:
                 zi = zipfile.ZipInfo(name, date_time=info.date_time)
-                zi.compress_type = zipfile.ZIP_DEFLATED
+                # 原来 STORED 的（resources.arsc 等）替换后仍 STORED
+                zi.compress_type = (zipfile.ZIP_STORED if info.compress_type == zipfile.ZIP_STORED
+                                    else zipfile.ZIP_DEFLATED)
                 zi.external_attr = info.external_attr
                 zout.writestr(zi, replacements[name])
                 written.add(name)
@@ -440,12 +467,40 @@ def dex_merge(base_dex, overlay_dex, out_dex):
     _run([_java_bin(), "-cp", cp2, MERGE_MAIN, base_dex, overlay_dex, out_dex, str(API_LEVEL)])
 
 
-def build_merged_classes_dex(base_dex_bytes, float_on, workdir):
+def patch_sig_smali_pkg(src, new_pkg):
+    """共存：把签名绕过 smali 里写死的原包名换成新包名。
+    - HookApplication.appPkgName 初值 / KillerApplication 兜底值 / q3.c() 的包名比较；
+    - KillerApplication.getCurrentPackageName() 原实现取的是 bin.mt.signature 这个 Java 包名
+      （static{} 里的 killPM 等于没生效），改成直接返回新包名，让 onCreate 之前就伪造到位。"""
+    lit_old, lit_new = f'"{ORIG_PKG}"', f'"{new_pkg}"'
+    for rel in SIG_PKG_SMALI:
+        p = os.path.join(src, rel)
+        with open(p, "r", encoding="utf-8") as f:
+            s = f.read()
+        n = s.count(lit_old)
+        s = s.replace(lit_old, lit_new)
+        if rel == KILLER_SMALI:
+            s, k = re.subn(
+                r"(\.method private static getCurrentPackageName\(\)Ljava/lang/String;\n).*?(\.end method)",
+                lambda m: (m.group(1) + "    .registers 1\n\n"
+                           f"    const-string v0, {lit_new}\n\n    return-object v0\n" + m.group(2)),
+                s, count=1, flags=re.S)
+            if k != 1:
+                sys.exit("KillerApplication.smali 未找到 getCurrentPackageName()，无法改共存包名")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(s)
+        print(f"[coexist] {rel}: 包名字面量 {n} 处 → {new_pkg}")
+
+
+def build_merged_classes_dex(base_dex_bytes, float_on, workdir, new_pkg=None):
     """把 assets/smali_inject 汇编成 overlay 并覆盖合并进 base classes.dex。返回新 dex 字节。
-    float_on=False（去签）时删掉 MapApplicationProxy 里拉起悬浮的那行（floatapp 类仍在但不激活）。"""
+    float_on=False（去签）时删掉 MapApplicationProxy 里拉起悬浮的那行（floatapp 类仍在但不激活）。
+    new_pkg（共存）：签名绕过 smali 里的原包名一并换成新包名。"""
     # 拷贝整套注入 smali 到工作目录
     src = os.path.join(workdir, "smali_src")
     shutil.copytree(SMALI_ASSET_DIR, src)
+    if new_pkg:
+        patch_sig_smali_pkg(src, new_pkg)
     if not float_on:
         proxy = os.path.join(src, APP_PROXY_SMALI)
         with open(proxy, "r", encoding="utf-8") as f:
@@ -592,8 +647,9 @@ def _parse_replaces(apk, specs):
     return out
 
 
-def _inject_and_pack(apk, out_path, float_on, manifest_mapping, tag, extra_files=None):
-    """覆盖合并签名绕过(+可选悬浮)进 classes.dex，可选改 manifest(共存)、替换任意内部文件，重打包 + 签名。"""
+def _inject_and_pack(apk, out_path, float_on, manifest_mapping, tag, extra_files=None, new_pkg=None):
+    """覆盖合并签名绕过(+可选悬浮)进 classes.dex，可选改 manifest(共存)、替换任意内部文件，重打包 + 签名。
+    new_pkg（共存）：签名绕过 smali 的写死包名 + resources.arsc 包名也改成新包名。"""
     dex = extract_entry(apk, "classes.dex")
     if dex is None:
         sys.exit("APK 中未找到 classes.dex")
@@ -605,12 +661,17 @@ def _inject_and_pack(apk, out_path, float_on, manifest_mapping, tag, extra_files
     print(f"[{tag}] 覆盖合并注入到 classes.dex（{'含悬浮' if float_on else '仅签名绕过'}）...")
     work = tempfile.mkdtemp(prefix="amap_inject_")
     try:
-        merged = build_merged_classes_dex(dex, float_on, work)
+        merged = build_merged_classes_dex(dex, float_on, work, new_pkg)
         print(f"[{tag}] 合并后 classes.dex: {len(merged)} B（原 {len(dex)} B）")
         repl = dict(extra_files or {})
         repl["classes.dex"] = merged
         if new_manifest is not None:
             repl["AndroidManifest.xml"] = new_manifest
+        if new_pkg:
+            arsc = repl.get("resources.arsc") or extract_entry(apk, "resources.arsc")
+            if arsc is not None:
+                repl["resources.arsc"] = arsc_set_package(arsc, new_pkg)
+                print(f"[{tag}] resources.arsc 包名 → {new_pkg}")
         tmp = out_path + ".tmp"
         zip_repack(apk, repl, tmp, strip_sig=True)
         _finish(tmp, out_path)
@@ -636,7 +697,8 @@ def cmd_coexist(args):
     for k, v in mapping.items():
         print(f"    {k}  ->  {v}")
     extra = _parse_replaces(args.apk, args.replace)
-    _inject_and_pack(args.apk, args.o or _default_out(args.apk, "coexist"), False, mapping, "coexist", extra)
+    _inject_and_pack(args.apk, args.o or _default_out(args.apk, "coexist"), False, mapping, "coexist", extra,
+                     new_pkg=new)
 
 
 def cmd_float(args):

@@ -109,6 +109,10 @@ python3 $S float    amap.apk                                       # 悬浮（fl
   清 `sPackageInfoCache`，把签名伪造回原厂证书）+ **覆盖 `com/alibaba/wireless/security/framework/e` 等
   削弱阿里 SecurityGuard** + 补进 `bin/mt/signature/**`、`floatapp/**`。manifest 不动。**只用 smali 汇编 + dexlib2 合并，不需要 baksmali。**
 - **qiansign**：合并签名绕过（删掉悬浮激活行）；**coexist**：再改 `package`/权限名/`authorities`（不动 activity 类名）；**float**：保留悬浮激活。
+- **coexist 还必须改两处包名**（toolbox 原版漏了，tool.apk 只做了 arsc）：
+  ① 签名绕过 smali 里写死的 `"com.autonavi.amapauto"`（`KillerApplication`×3、`HookApplication`×1、`q3`×1）换成新包名；
+  且 `KillerApplication.getCurrentPackageName()` 原实现取的是 `bin.mt.signature`（类所在 Java 包），`static{}` 里那次签名伪造等于没生效，改成直接返回新包名；
+  ② `resources.arsc` 的 package chunk 包名改成新包名，否则 `getIdentifier(..., getPackageName())` 查不到资源。
 - 三者都会：剥 META-INF 旧签名 → 重签名。**签名用 apksig 做 v1+v2**（与 toolbox 一致，v3 关闭；
   首次自动下载 apksig，不需要 Android SDK；失败才回退 jarsigner v1）。
   smali/dexlib2/apksig 工具链首次自动下载到 `~/.config/amap-toolbox/smali/`；密钥固定在 `~/.config/amap-toolbox/amap.keystore`。

@@ -267,6 +267,8 @@ python3 $S sign     amap.apk                                       # 仅重签�
 
 - **qiansign**：合并签名绕过；删掉 `MapApplicationProxy.onCreate` 里拉起悬浮那行（floatapp 类仍在但不激活）。
 - **coexist**：去签 + 改 `package`/权限名/`provider authorities`（**不动 activity 等类名**），可与原版并存。
+  另外：签名绕过 smali（`KillerApplication`/`HookApplication`/`q3`）里写死的原包名换成新包名，
+  `getCurrentPackageName()` 直接返回新包名（让 `static{}` 的签名伪造生效）；`resources.arsc` 包名也改成新包名。
 - **float**：去签 + 保留悬浮激活（`TYPE_APPLICATION_OVERLAY`）。
 - 三者都会：剥 META-INF 旧签名 →（有 zipalign 就对齐）→ 重签名。
 
